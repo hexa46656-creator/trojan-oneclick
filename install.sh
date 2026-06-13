@@ -34,7 +34,7 @@ require_vars() {
 
 install_packages() {
   apt-get update -y
-  apt-get install -y nginx certbot dnsutils curl unzip ca-certificates ufw
+  apt-get install -y nginx certbot python3-certbot-nginx dnsutils curl unzip ca-certificates ufw xz-utils python3 openssl
 }
 
 get_public_ip() {
@@ -53,7 +53,7 @@ check_dns() {
     err "无法获取当前 VPS 公网 IPv4，请先确认网络可用"
     exit 1
   fi
-  domain_ip="$(dig +short "$DOMAIN" A | head -n1 | tr -d '\r')"
+  domain_ip="$(dig +short A "$DOMAIN" | head -n1 | tr -d '\r')"
   if [[ -z "$domain_ip" ]]; then
     err "DOMAIN 未解析出 A 记录：$DOMAIN"
     err "请先添加正确的 A 记录，再重新执行安装"
@@ -84,7 +84,7 @@ install_trojan_binary() {
   arch="$(detect_arch)"
   api_url="https://api.github.com/repos/trojan-gfw/trojan/releases/latest"
   asset_url="$(curl -fsSL "$api_url" \
-    | grep -oE '"browser_download_url":[[:space:]]*"[^"]*linux[^"]*tar[^"]*"' \
+    | grep -oE '"browser_download_url":[[:space:]]*"[^"]*\.tar\.xz"' \
     | grep -E "(${arch}|x86_64|amd64|arm64)" \
     | head -n1 \
     | cut -d'"' -f4)"
@@ -94,8 +94,8 @@ install_trojan_binary() {
   fi
   tmpdir="$(mktemp -d)"
   log "下载 Trojan：$asset_url"
-  curl -fsSL "$asset_url" -o "$tmpdir/trojan.tar"
-  tar -xf "$tmpdir/trojan.tar" -C "$tmpdir"
+  curl -fsSL "$asset_url" -o "$tmpdir/trojan.tar.xz"
+  tar -xf "$tmpdir/trojan.tar.xz" -C "$tmpdir"
   if [[ -f "$tmpdir/trojan" ]]; then
     install -m 0755 "$tmpdir/trojan" /usr/local/bin/trojan
   else
@@ -134,6 +134,14 @@ request_certificate() {
 
 generate_password() {
   openssl rand -base64 24 | tr -d '\n'
+}
+
+urlencode() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe=''))
+PY
 }
 
 write_config() {
@@ -184,27 +192,30 @@ allow_ufw_ports() {
 
 write_client_file() {
   local password="$1"
-  local trojan_uri
-
-  trojan_uri="trojan://${password}@${DOMAIN}:${PORT}?sni=${DOMAIN}#Trojan-${DOMAIN}"
+  local encoded_password encoded_name trojan_uri
+  encoded_password="$(urlencode "$password")"
+  encoded_name="$(urlencode "Trojan-${DOMAIN}")"
+  trojan_uri="trojan://${encoded_password}@${DOMAIN}:${PORT}?peer=${DOMAIN}&sni=${DOMAIN}#${encoded_name}"
 
   cat > "$CLIENT_FILE" <<EOF
 Trojan 客户端信息
 =================
 域名: ${DOMAIN}
-端口: ${PORT}/tcp
-密码: ${password}
-证书: Let's Encrypt
+端口: ${PORT}
+原始密码: ${password}
 SNI: ${DOMAIN}
+Peer: ${DOMAIN}
 
-示例客户端配置:
-server: ${DOMAIN}
-port: ${PORT}
-password: ${password}
-sni: ${DOMAIN}
-ssl: true
+Shadowrocket 手动填写说明:
+类型: Trojan
+地址: ${DOMAIN}
+端口: ${PORT}
+密码: 原始密码
+TLS: 开启
+SNI/Peer: ${DOMAIN}
+Allow Insecure: 关闭
 
-最终客户端导入链接:
+最终 trojan:// 导入链接:
 ${trojan_uri}
 EOF
 
@@ -216,27 +227,15 @@ print_final_screen() {
   trojan_uri="$(grep -E '^trojan://' "$CLIENT_FILE" | tail -n 1 || true)"
 
   printf '\n\033[1;32m============================================================\033[0m\n'
-  printf '\033[1;32m✅ Trojan 部署完成\033[0m\n'
+  printf '\033[1;32mTrojan 部署完成\033[0m\n'
   printf '\033[1;32m============================================================\033[0m\n'
-  printf '\033[1;33m协议：Trojan\033[0m\n'
-  printf '\033[1;33m域名：%s\033[0m\n' "$DOMAIN"
-  printf '\033[1;33mTCP 端口：%s\033[0m\n' "$PORT"
-  printf '\033[1;33mSNI：%s\033[0m\n' "$DOMAIN"
-  printf '\033[1;33mTLS 证书：Let'\''s Encrypt\033[0m\n'
-  printf '\033[1;33m客户端信息保存路径：%s\033[0m\n' "$CLIENT_FILE"
-  printf '\n'
-
-  printf '\033[1;36m============================================================\033[0m\n'
-  printf '\033[1;36m📌 最终客户端导入链接，请复制到客户端使用\033[0m\n'
-  printf '\033[1;36m============================================================\033[0m\n'
-
-  if [[ -n "$trojan_uri" ]]; then
-    printf '\033[1;36m%s\033[0m\n' "$trojan_uri"
-  else
-    printf '\033[1;31m未能从 %s 中读取 trojan:// 链接\033[0m\n' "$CLIENT_FILE"
-  fi
-
-  printf '\n\033[1;32m客户端信息已保存到：%s\033[0m\n' "$CLIENT_FILE"
+  printf '\033[1;33m域名: %s\033[0m\n' "$DOMAIN"
+  printf '\033[1;33m端口: %s\033[0m\n' "$PORT"
+  printf '\033[1;33mSNI: %s\033[0m\n' "$DOMAIN"
+  printf '\033[1;33mPeer: %s\033[0m\n' "$DOMAIN"
+  printf '\033[1;33m客户端信息保存路径: %s\033[0m\n' "$CLIENT_FILE"
+  printf '\n\033[1;36m最终 trojan:// 导入链接\033[0m\n'
+  printf '\033[1;36m%s\033[0m\n' "$trojan_uri"
 }
 
 main() {

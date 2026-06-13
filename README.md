@@ -1,85 +1,82 @@
 # Trojan 一键部署脚本
 
-## 1. Trojan 为什么需要域名和证书
+## 1. 项目用途
 
-Trojan 的设计目标是让流量看起来像正常的 HTTPS 流量，因此它通常运行在 `443/tcp` 上，并依赖真实域名和受信任的 TLS 证书。这样客户端和服务端之间可以完成标准 TLS 握手，也更接近真实网站访问行为。
+用于在 Ubuntu LTS 上一键部署 Trojan 服务端，自动申请 Let's Encrypt 证书、生成随机密码、创建 systemd 服务，并把客户端导入信息保存到 `/root/trojan-client.txt`。
 
-## 2. Cloudflare DNS only 设置步骤
+## 2. 默认端口
 
-如果你使用 Cloudflare 管理域名，请把 A 记录设置为 `DNS only`，不要开启橙色云代理。原因是 Trojan 需要直接连接到你的 VPS 真实公网 IP，Cloudflare 代理会干扰证书申请和直连握手。
+默认端口是 `443/tcp`。
 
-操作步骤：
-
-1. 登录 Cloudflare 控制台。
-2. 进入域名的 DNS 页面。
-3. 添加或修改 A 记录。
-4. 将代理状态设置为灰色云朵，也就是 `DNS only`。
-5. 保存后等待解析生效。
-
-## 3. 如何添加 A 记录
-
-新增一条 A 记录，示例：
-
-- Name: `proxy`
-- Type: `A`
-- Content: 你的 VPS 公网 IPv4
-- TTL: Auto
-- Proxy Status: DNS only
-
-最终域名示例就是 `proxy.example.com`。
-
-## 4. 如何检查 dig +short DOMAIN
-
-在本机或服务器上执行：
+## 3. 自定义端口示例
 
 ```bash
-dig +short proxy.example.com
+PORT=8444 DOMAIN=proxy.example.com EMAIL=admin@example.com bash install.sh
 ```
 
-如果输出的 IP 与你的 VPS 公网 IPv4 一致，说明 DNS 已正确指向当前服务器。
-
-## 5. 如何检查 curl -4 ifconfig.me
-
-在 VPS 上执行：
+## 4. 一键安装命令示例
 
 ```bash
-curl -4 ifconfig.me
+DOMAIN=proxy.example.com EMAIL=admin@example.com bash <(curl -fsSL https://raw.githubusercontent.com/hexa46656-creator/trojan-oneclick/main/install.sh)
 ```
 
-这个命令会显示当前服务器的公网 IPv4。安装脚本会用它来校验域名解析是否正确。
+## 5. 必要依赖
 
-## 6. 一键安装命令
+安装脚本会自动安装以下依赖：
 
-```bash
-DOMAIN=proxy.example.com EMAIL=admin@example.com bash install.sh
-```
+- nginx
+- certbot
+- python3-certbot-nginx
+- dnsutils
+- curl
+- unzip
+- ca-certificates
+- ufw
+- xz-utils
+- python3
 
-## 7. 查看状态命令
+## 6. 域名与 Cloudflare 要求
+
+Trojan 必须使用真实域名和证书。请把域名的 DNS 设置为 `DNS only`，不要开启 Cloudflare 橙色云朵代理，否则证书申请和直连都可能失败。
+
+## 7. 端口要求
+
+安装完成后，`80/tcp` 和 `443/tcp` 必须放行。脚本会在检测到 UFW 已启用时自动放行这两个端口，但不会重置 UFW，也不会修改 SSH。
+
+## 8. 安装完成后的输出
+
+安装成功后，终端最后一屏会显示彩色高亮的 `trojan://` 导入链接，方便直接复制到 Shadowrocket 或其他客户端。
+
+## 9. Shadowrocket 手动填写
+
+如果 Shadowrocket 无法导入，可手动填写：
+
+- 类型：Trojan
+- 地址：DOMAIN
+- 端口：PORT
+- 密码：原始密码
+- TLS：开启
+- SNI/Peer：DOMAIN
+- Allow Insecure：关闭
+
+## 10. 状态查看
 
 ```bash
 bash status.sh
 ```
 
-## 8. 卸载命令
+状态脚本会显示 Trojan 服务状态、监听端口，并直接展示 `/root/trojan-client.txt` 的内容。
+
+## 11. 卸载命令
 
 ```bash
 bash uninstall.sh
 ```
 
-## 9. 客户端配置说明
+## 12. 常见故障排查
 
-安装完成后，客户端信息会保存到：
-
-```bash
-/root/trojan-client.txt
-```
-
-该文件包含域名、端口、密码和客户端连接要点。Trojan 使用真实域名和 Let's Encrypt 证书，因此客户端正常情况下不需要 `insecure`。
-
-## 10. 常见故障排查
-
-1. DNS 校验失败：确认 `dig +short DOMAIN` 返回的是当前 VPS 的公网 IPv4。
-2. 证书申请失败：确认 `80/tcp` 可达，Cloudflare 必须使用 `DNS only`。
-3. 服务未启动：执行 `bash status.sh` 查看 systemd 状态和日志。
-4. 端口被拦截：检查云厂商安全组和本机 UFW，确认 `443/tcp` 已放行。
-5. 域名不对：确认 `DOMAIN` 和 `EMAIL` 都已正确传入安装命令。
+1. DNS 未生效：先检查 `dig +short DOMAIN` 是否返回当前 VPS 的公网 IPv4。
+2. 公网 IP 不一致：先检查 `curl -4 ifconfig.me` 的结果。
+3. 证书申请失败：查看 `/var/log/letsencrypt/letsencrypt.log`。
+4. 服务启动失败：查看 `journalctl -u trojan-go -n 100 --no-pager`。
+5. 端口无法访问：确认云服务器安全组和本机防火墙已经放行 `80/tcp` 与 `443/tcp`。
