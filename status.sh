@@ -1,28 +1,50 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SERVICE="trojan-server.service"
-CONFIG_FILE="/etc/trojan/config.json"
 CLIENT_FILE="/root/trojan-client.txt"
+SERVICE_NAME="trojan-go.service"
 
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  echo "请使用 root 执行：bash status.sh" >&2
-  exit 1
-fi
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[0;31m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-printf '\033[1;34mTrojan 状态检查\033[0m\n'
-systemctl status "$SERVICE" --no-pager || true
+info() { printf "${GREEN}[INFO]${NC} %s\n" "$*"; }
+warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$*"; }
 
-printf '\n\033[1;34m配置文件\033[0m\n'
-if [[ -f "$CONFIG_FILE" ]]; then
-  ls -l "$CONFIG_FILE"
-else
-  echo "未找到配置文件：$CONFIG_FILE"
-fi
+main() {
+  printf "${BOLD}${GREEN}============================================================${NC}\n"
+  printf "${BOLD}${GREEN}Trojan 状态检查${NC}\n"
+  printf "${BOLD}${GREEN}============================================================${NC}\n"
 
-printf '\n\033[1;34m客户端文件\033[0m\n'
-if [[ -f "$CLIENT_FILE" ]]; then
-  ls -l "$CLIENT_FILE"
-else
-  echo "未找到客户端文件：$CLIENT_FILE"
-fi
+  if systemctl list-unit-files | grep -q "^${SERVICE_NAME}"; then
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+      info "服务状态：active"
+    else
+      warn "服务状态：inactive 或 failed"
+    fi
+
+    systemctl status "$SERVICE_NAME" --no-pager || true
+  else
+    warn "未找到 systemd 服务：$SERVICE_NAME"
+  fi
+
+  printf "\n"
+  info "监听端口检查："
+  ss -tulpn | grep -E 'trojan|trojan-go|:443' || warn "未检测到 Trojan 常见监听端口。"
+
+  printf "\n"
+  if [[ -f "$CLIENT_FILE" ]]; then
+    printf "${BOLD}${CYAN}============================================================${NC}\n"
+    printf "${BOLD}${CYAN}📌 Trojan 客户端导入信息${NC}\n"
+    printf "${BOLD}${CYAN}============================================================${NC}\n"
+    cat "$CLIENT_FILE"
+    printf "\n"
+  else
+    warn "未找到客户端文件：$CLIENT_FILE"
+  fi
+}
+
+main "$@"

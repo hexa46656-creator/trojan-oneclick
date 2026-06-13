@@ -6,7 +6,7 @@ export DEBIAN_FRONTEND=noninteractive
 DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
 SERVICE="trojan-server.service"
-PORT="443"
+PORT="${PORT:-443}"
 CONFIG_DIR="/etc/trojan"
 CONFIG_FILE="/etc/trojan/config.json"
 CLIENT_FILE="/root/trojan-client.txt"
@@ -178,12 +178,16 @@ EOF
 allow_ufw_ports() {
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
     ufw allow 80/tcp >/dev/null
-    ufw allow 443/tcp >/dev/null
+    ufw allow "${PORT}/tcp" >/dev/null
   fi
 }
 
 write_client_file() {
   local password="$1"
+  local trojan_uri
+
+  trojan_uri="trojan://${password}@${DOMAIN}:${PORT}?sni=${DOMAIN}#Trojan-${DOMAIN}"
+
   cat > "$CLIENT_FILE" <<EOF
 Trojan 客户端信息
 =================
@@ -199,14 +203,40 @@ port: ${PORT}
 password: ${password}
 sni: ${DOMAIN}
 ssl: true
+
+最终客户端导入链接:
+${trojan_uri}
 EOF
+
   chmod 600 "$CLIENT_FILE"
 }
 
 print_final_screen() {
-  printf '\n\033[1;36m========== Trojan 客户端信息 ==========\033[0m\n'
-  cat "$CLIENT_FILE"
-  printf '\033[1;36m========================================\033[0m\n'
+  local trojan_uri
+  trojan_uri="$(grep -E '^trojan://' "$CLIENT_FILE" | tail -n 1 || true)"
+
+  printf '\n\033[1;32m============================================================\033[0m\n'
+  printf '\033[1;32m✅ Trojan 部署完成\033[0m\n'
+  printf '\033[1;32m============================================================\033[0m\n'
+  printf '\033[1;33m协议：Trojan\033[0m\n'
+  printf '\033[1;33m域名：%s\033[0m\n' "$DOMAIN"
+  printf '\033[1;33mTCP 端口：%s\033[0m\n' "$PORT"
+  printf '\033[1;33mSNI：%s\033[0m\n' "$DOMAIN"
+  printf '\033[1;33mTLS 证书：Let'\''s Encrypt\033[0m\n'
+  printf '\033[1;33m客户端信息保存路径：%s\033[0m\n' "$CLIENT_FILE"
+  printf '\n'
+
+  printf '\033[1;36m============================================================\033[0m\n'
+  printf '\033[1;36m📌 最终客户端导入链接，请复制到客户端使用\033[0m\n'
+  printf '\033[1;36m============================================================\033[0m\n'
+
+  if [[ -n "$trojan_uri" ]]; then
+    printf '\033[1;36m%s\033[0m\n' "$trojan_uri"
+  else
+    printf '\033[1;31m未能从 %s 中读取 trojan:// 链接\033[0m\n' "$CLIENT_FILE"
+  fi
+
+  printf '\n\033[1;32m客户端信息已保存到：%s\033[0m\n' "$CLIENT_FILE"
 }
 
 main() {
