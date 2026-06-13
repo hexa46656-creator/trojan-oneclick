@@ -80,34 +80,61 @@ detect_arch() {
 }
 
 install_trojan_binary() {
-  local arch api_url asset_url tmpdir
+  log "Installing Trojan binary..."
+
+  local arch api_url asset_url tmpdir archive_file trojan_bin
   arch="$(detect_arch)"
   api_url="https://api.github.com/repos/trojan-gfw/trojan/releases/latest"
-  asset_url="$(curl -fsSL "$api_url" \
+  tmpdir="/tmp/trojan-oneclick"
+  archive_file="${tmpdir}/trojan.tar.xz"
+
+  mkdir -p "$tmpdir"
+
+  asset_url="$(curl -fsSL \
+    -H "User-Agent: trojan-oneclick-installer" \
+    "$api_url" \
     | grep -oE '"browser_download_url":[[:space:]]*"[^"]*\.tar\.xz"' \
     | grep -E "(${arch}|x86_64|amd64|arm64)" \
     | head -n1 \
-    | cut -d'"' -f4)"
+    | cut -d'"' -f4 || true)"
+
   if [[ -z "${asset_url:-}" ]]; then
-    err "未能找到适合当前架构的 Trojan 安装包"
+    warn "GitHub API latest request failed or returned no matching asset; using fallback Trojan version."
+    TROJAN_VERSION="${TROJAN_VERSION:-1.16.0}"
+    asset_url="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
+
+    if [[ "$arch" =~ arm64|aarch64 ]]; then
+      warn "Fallback URL currently points to linux-amd64. This may not work on ARM64 systems."
+    fi
+  fi
+
+  log "Downloading Trojan from: $asset_url"
+
+  curl -fL "$asset_url" -o "$archive_file" || {
+    err "Failed to download Trojan binary."
+    exit 1
+  }
+
+  tar -xf "$archive_file" -C "$tmpdir" || {
+    err "Failed to extract Trojan archive."
+    exit 1
+  }
+
+  trojan_bin="$(find "$tmpdir" -type f -name trojan | head -n1 || true)"
+
+  if [[ -z "${trojan_bin:-}" ]]; then
+    err "Trojan binary not found after extraction."
     exit 1
   fi
-  tmpdir="$(mktemp -d)"
-  log "下载 Trojan：$asset_url"
-  curl -fsSL "$asset_url" -o "$tmpdir/trojan.tar.xz"
-  tar -xf "$tmpdir/trojan.tar.xz" -C "$tmpdir"
-  if [[ -f "$tmpdir/trojan" ]]; then
-    install -m 0755 "$tmpdir/trojan" /usr/local/bin/trojan
-  else
-    local binary
-    binary="$(find "$tmpdir" -type f -name trojan | head -n1)"
-    if [[ -z "$binary" ]]; then
-      err "未在 Trojan 压缩包中找到可执行文件"
-      exit 1
-    fi
-    install -m 0755 "$binary" /usr/local/bin/trojan
-  fi
-  rm -rf "$tmpdir"
+
+  install -m 755 "$trojan_bin" /usr/local/bin/trojan
+
+  command -v trojan >/dev/null 2>&1 || {
+    err "Trojan installation failed: trojan command not found."
+    exit 1
+  }
+
+  log "Trojan installed successfully: $(trojan -v 2>&1 | head -n1 || true)"
 }
 
 write_nginx_http_site() {
@@ -184,9 +211,22 @@ EOF
 }
 
 allow_ufw_ports() {
-  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
+  if command -v ufw >/dev/null 2>&1; then
+    log "Configuring UFW port rules..."
+
     ufw allow 80/tcp >/dev/null
     ufw allow "${PORT}/tcp" >/dev/null
+
+    if ufw status | grep -q '^Status: active'; then
+      ufw reload >/dev/null || true
+      log "UFW is active. Allowed 80/tcp and ${PORT}/tcp."
+    else
+      warn "UFW is not active. Port rules have been added but are not currently effective."
+      warn "Before enabling UFW, make sure your SSH port is allowed to avoid locking yourself out."
+      warn "If you are sure it is safe, run manually: ufw allow OpenSSH && ufw enable"
+    fi
+  else
+    warn "UFW not found. Skipping firewall rule configuration."
   fi
 }
 
