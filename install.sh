@@ -19,7 +19,7 @@ err() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; }
 
 require_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    err "请使用 root 执行：DOMAIN=xxx EMAIL=yyy bash install.sh"
+    err "请使用 root 执行：DOMAIN=已经解析到你的IP的域名 EMAIL=您的邮箱 bash install.sh"
     exit 1
   fi
 }
@@ -27,7 +27,10 @@ require_root() {
 require_vars() {
   if [[ -z "$DOMAIN" || -z "$EMAIL" ]]; then
     err "必须通过环境变量提供 DOMAIN 和 EMAIL"
-    err "示例：DOMAIN=proxy.example.com EMAIL=admin@example.com bash install.sh"
+    err "DOMAIN 必须是已经解析到本 VPS IP 的域名"
+    err "EMAIL 请填写你的邮箱，用于申请 Let's Encrypt TLS 证书"
+    err "示例："
+    err "DOMAIN=已经解析到你的IP的域名 EMAIL=您的邮箱 bash install.sh"
     exit 1
   fi
 }

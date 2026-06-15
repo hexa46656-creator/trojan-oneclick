@@ -11,14 +11,17 @@
 ## 3. 自定义端口示例
 
 ```bash
-PORT=8444 DOMAIN=proxy.example.com EMAIL=admin@example.com bash install.sh
+PORT=8444 DOMAIN=已经解析到你的IP的域名 EMAIL=您的邮箱 bash install.sh
 ```
 
 ## 4. 一键安装命令示例
 
 ```bash
-DOMAIN=proxy.example.com EMAIL=admin@example.com bash <(curl -fsSL https://raw.githubusercontent.com/hexa46656-creator/trojan-oneclick/main/install.sh)
+DOMAIN=已经解析到你的IP的域名 EMAIL=您的邮箱 bash <(curl -fsSL https://raw.githubusercontent.com/hexa46656-creator/trojan-oneclick/main/install.sh)
 ```
+
+请把 `已经解析到你的IP的域名` 替换为已经解析到当前 VPS IP 的真实域名。
+请把 `您的邮箱` 替换为你的真实邮箱，用于申请 Let's Encrypt TLS 证书。
 
 ## 5. 必要依赖
 
