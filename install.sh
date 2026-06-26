@@ -50,24 +50,36 @@ get_public_ip() {
 }
 
 check_dns() {
-  local domain_ip public_ip
+  local public_ip system_dns cloudflare_dns google_dns
   public_ip="$(get_public_ip)"
   if [[ -z "$public_ip" ]]; then
     err "无法获取当前 VPS 公网 IPv4，请先确认网络可用"
     exit 1
   fi
-  domain_ip="$(dig +short A "$DOMAIN" | head -n1 | tr -d '\r')"
-  if [[ -z "$domain_ip" ]]; then
-    err "DOMAIN 未解析出 A 记录：$DOMAIN"
-    err "请先添加正确的 A 记录，再重新执行安装"
+
+  system_dns="$(dig +short A "$DOMAIN" | head -n1 | tr -d '\r')"
+  cloudflare_dns="$(dig +short A "$DOMAIN" @1.1.1.1 | head -n1 | tr -d '\r')"
+  google_dns="$(dig +short A "$DOMAIN" @8.8.8.8 | head -n1 | tr -d '\r')"
+
+  log "当前 VPS 公网 IPv4: ${public_ip}"
+  log "系统 DNS 解析结果: ${system_dns:-<空>}"
+  log "1.1.1.1 解析结果: ${cloudflare_dns:-<空>}"
+  log "8.8.8.8 解析结果: ${google_dns:-<空>}"
+
+  if [[ -z "$system_dns" || -z "$cloudflare_dns" || -z "$google_dns" ]]; then
+    err "DNS 校验失败：至少有一个解析器没有返回 A 记录。"
+    err "DNS 传播不完整或解析器结果不一致，可能导致证书签发失败、客户端连不上，或者 Trojan 连接不稳定。"
     exit 1
   fi
-  if [[ "$domain_ip" != "$public_ip" ]]; then
-    err "DNS 解析不正确"
+
+  if [[ "$system_dns" != "$public_ip" || "$cloudflare_dns" != "$public_ip" || "$google_dns" != "$public_ip" ]]; then
+    err "DNS 校验失败：解析结果与当前 VPS 公网 IPv4 不一致。"
+    err "DNS 传播不完整或解析器结果不一致，可能导致证书签发失败、客户端连不上，或者 Trojan 连接不稳定。"
     err "DOMAIN: $DOMAIN"
-    err "解析到: $domain_ip"
     err "当前 VPS: $public_ip"
-    err "请将 A 记录修正到当前 VPS 公网 IPv4 后重试"
+    err "系统 DNS: $system_dns"
+    err "1.1.1.1: $cloudflare_dns"
+    err "8.8.8.8: $google_dns"
     exit 1
   fi
 }
@@ -159,7 +171,22 @@ EOF
 }
 
 request_certificate() {
-  certbot certonly --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --keep-until-expiring
+  if certbot certonly --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --keep-until-expiring; then
+    return 0
+  fi
+
+  warn "Nginx 模式申请证书失败，尝试使用 webroot 回退方式。"
+  if certbot certonly --webroot -w /var/www/html -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --keep-until-expiring; then
+    return 0
+  fi
+
+  err "证书申请失败，请按以下顺序排查："
+  err "1) 检查 DNS A 记录是否已经正确指向当前 VPS 公网 IPv4"
+  err "2) 检查 80 端口是否可从公网访问"
+  err "3) 检查 nginx 状态是否正常"
+  err "4) 如果你在使用 Cloudflare，请在签发证书期间切换为 DNS only"
+  err "5) 查看 certbot 日志 /var/log/letsencrypt/ 下的详细错误"
+  exit 1
 }
 
 generate_password() {
