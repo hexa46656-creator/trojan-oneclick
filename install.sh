@@ -12,10 +12,19 @@ CONFIG_FILE="/etc/trojan/config.json"
 CLIENT_FILE="/root/trojan-client.txt"
 NGINX_SITE="/etc/nginx/sites-available/trojan"
 NGINX_LINK="/etc/nginx/sites-enabled/trojan"
+INSTALLER_CORE_DIR="${INSTALLER_CORE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../vps-installer-core" 2>/dev/null && pwd || true)}"
 
 log() { printf '\033[1;32m[INFO]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; }
+
+if [[ -z "${INSTALLER_CORE_DIR}" || ! -f "${INSTALLER_CORE_DIR}/installer_core.sh" ]]; then
+  err "Missing shared installer core. Expected vps-installer-core/installer_core.sh next to this repository or set INSTALLER_CORE_DIR."
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "${INSTALLER_CORE_DIR}/installer_core.sh"
 
 require_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -36,8 +45,60 @@ require_vars() {
 }
 
 install_packages() {
-  apt-get update -y
-  apt-get install -y nginx certbot python3-certbot-nginx dnsutils curl unzip ca-certificates ufw xz-utils python3 openssl
+  installer_core_install_packages nginx certbot python3-certbot-nginx dnsutils curl unzip ca-certificates ufw xz-utils python3 openssl qrencode
+}
+
+print_client_qr() {
+  local client_url="${1:-}"
+  local output_file="${2:-}"
+
+  if [[ -z "${client_url}" ]]; then
+    echo "[WARN] Client URL is empty, skip QR code generation."
+    return 0
+  fi
+
+  if [[ -z "${output_file}" ]]; then
+    output_file="/root/trojan-qr.png"
+  fi
+
+  if ! command -v qrencode >/dev/null 2>&1; then
+    echo "[INFO] Installing qrencode..."
+    if command -v apt >/dev/null 2>&1; then
+      apt update >/dev/null 2>&1 || true
+      apt install -y qrencode >/dev/null 2>&1 || true
+    elif command -v apt-get >/dev/null 2>&1; then
+      apt-get update -y >/dev/null 2>&1 || true
+      apt-get install -y qrencode >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if ! command -v qrencode >/dev/null 2>&1; then
+    echo "[WARN] qrencode is not available, skip QR code generation."
+    echo "[INFO] Client URL:"
+    echo "${client_url}"
+    return 0
+  fi
+
+  echo
+  echo "========== Client QR Code =========="
+  if ! qrencode -t ANSIUTF8 "${client_url}"; then
+    echo "[WARN] Failed to render QR code in terminal."
+  fi
+
+  if qrencode -o "${output_file}" "${client_url}"; then
+    chmod 600 "${output_file}"
+    echo
+    echo "[OK] QR code saved to: ${output_file}"
+  else
+    echo "[WARN] Failed to save QR code PNG."
+  fi
+
+  echo
+  echo "Mobile import:"
+  echo "1. Open Shadowrocket / v2rayNG / Hiddify / NekoBox"
+  echo "2. Tap scan QR code"
+  echo "3. Scan the QR code above"
+  echo "4. Save and test the node"
 }
 
 get_public_ip() {
@@ -263,9 +324,11 @@ allow_ufw_ports() {
 write_client_file() {
   local password="$1"
   local encoded_password encoded_name trojan_uri
+  local subscription_uuid
   encoded_password="$(urlencode "$password")"
   encoded_name="$(urlencode "Trojan-${DOMAIN}")"
   trojan_uri="trojan://${encoded_password}@${DOMAIN}:${PORT}?peer=${DOMAIN}&sni=${DOMAIN}#${encoded_name}"
+  subscription_uuid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)"
 
   cat > "$CLIENT_FILE" <<EOF
 Trojan 客户端信息
@@ -290,6 +353,17 @@ ${trojan_uri}
 EOF
 
   chmod 600 "$CLIENT_FILE"
+
+  export SUBSCRIPTION_PROTOCOL="trojan"
+  export SUBSCRIPTION_UUID="${subscription_uuid}"
+  export SUBSCRIPTION_DIR="/sub/${subscription_uuid}"
+  export SUBSCRIPTION_SERVER="${DOMAIN}"
+  export SUBSCRIPTION_PASSWORD="${password}"
+  export SUBSCRIPTION_CLIENT_NAME="Trojan"
+  export SUBSCRIPTION_PORT="${PORT}"
+  export SUBSCRIPTION_SNI="${DOMAIN}"
+  installer_core_subscription_protocol_defaults
+  installer_core_publish_subscription
 }
 
 print_final_screen() {
@@ -306,6 +380,9 @@ print_final_screen() {
   printf '\033[1;33m客户端信息保存路径: %s\033[0m\n' "$CLIENT_FILE"
   printf '\n\033[1;36m最终 trojan:// 导入链接\033[0m\n'
   printf '\033[1;36m%s\033[0m\n' "$trojan_uri"
+  installer_core_print_completion_block "$(installer_core_mode_label)" "${SUBSCRIPTION_ACCESS_URL}" "Shadowrocket, v2rayNG, Clash, sing-box"
+
+  print_client_qr "${SUBSCRIPTION_ACCESS_URL:-${trojan_uri:-}}" "/root/trojan-qr.png"
 }
 
 main() {

@@ -83,3 +83,80 @@ bash uninstall.sh
 3. 证书申请失败：查看 `/var/log/letsencrypt/letsencrypt.log`。
 4. 服务启动失败：查看 `journalctl -u trojan-go -n 100 --no-pager`。
 5. 端口无法访问：确认云服务器安全组和本机防火墙已经放行 `80/tcp` 与 `443/tcp`。
+
+## 中文说明
+
+### 项目简介
+
+本项目用于在 Ubuntu VPS 上一键部署 Trojan 服务端。脚本会自动申请证书、生成随机密码、创建 systemd 服务，并把客户端导入信息保存到本机。
+
+### 支持系统
+
+- Ubuntu LTS
+- 需要可正常解析到当前 VPS IP 的真实域名
+
+### 一键安装命令
+
+```bash
+sudo -i
+apt update && apt install -y curl
+DOMAIN=已经解析到你的IP的域名 EMAIL=您的邮箱 bash <(curl -fsSL https://raw.githubusercontent.com/hexa46656-creator/trojan-oneclick/main/install.sh)
+```
+
+### 默认端口
+
+- 默认端口：`443/tcp`
+
+### 默认 SNI
+
+- Trojan 使用你填写的域名作为 `SNI/Peer`
+- 不使用固定公共域名
+- 如果你修改了 `DOMAIN`，客户端里的 `peer` 和 `sni` 也会随之变化
+
+### 安装完成后的客户端链接
+
+- 客户端信息保存到：`/root/trojan-client.txt`
+- 安装完成后，终端会显示原始 `trojan://` 导入链接
+- 同时也会输出订阅链接，方便支持订阅的客户端使用
+
+### 二维码扫码导入
+
+安装完成后，脚本会在终端显示二维码，并保存 PNG 文件。
+
+- 二维码内容优先使用脚本最终生成的订阅链接
+- 如果订阅链接不可用，会回退到原始 `trojan://` 链接
+- PNG 文件保存路径：`/root/trojan-qr.png`
+
+常用客户端：
+
+- Shadowrocket
+- v2rayNG
+- Hiddify
+- NekoBox
+- Clash / Clash Verge
+
+### 状态检查命令
+
+```bash
+bash status.sh
+```
+
+### 卸载命令
+
+```bash
+bash uninstall.sh
+```
+
+### 安全提示
+
+- 请确保域名已经正确解析到当前 VPS
+- 请确保 `80/tcp` 和 `443/tcp` 在云安全组和本机防火墙中已放行
+- 不要把客户端密码公开分享
+
+### 故障排查
+
+1. 先执行 `bash status.sh` 查看服务状态和日志
+2. 确认 `dig +short DOMAIN` 的结果等于当前 VPS 公网 IP
+3. 确认 `80/tcp` 和 `443/tcp` 已放行
+4. 如果二维码无法显示，直接复制 `/root/trojan-client.txt` 中的原始链接手动导入
+5. 如果证书申请失败，查看 `/var/log/letsencrypt/letsencrypt.log`
