@@ -12,6 +12,8 @@ CONFIG_FILE="/etc/trojan/config.json"
 CLIENT_FILE="/root/trojan-client.txt"
 NGINX_SITE="/etc/nginx/sites-available/trojan"
 NGINX_LINK="/etc/nginx/sites-enabled/trojan"
+NETWORK_SYSCTL_FILE="/etc/sysctl.d/99-trojan-oneclick-tuning.conf"
+UFW_MSS_CLAMP_MARKER="vpsguard-trojan-mss-clamp"
 INSTALLER_CORE_DIR="${INSTALLER_CORE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../vps-installer-core" 2>/dev/null && pwd || true)}"
 
 log() { printf '\033[1;32m[INFO]\033[0m %s\n' "$*"; }
@@ -156,6 +158,78 @@ preflight_checks() {
 
 install_packages() {
   installer_core_install_packages nginx certbot python3-certbot-nginx dnsutils curl unzip ca-certificates ufw xz-utils python3 openssl qrencode iproute2
+}
+
+detect_path_mtu() {
+  local mtu
+
+  mtu="$(ip route get 1.1.1.1 2>/dev/null | awk 'match($0, /mtu ([0-9]+)/, m) {print m[1]; exit}')"
+
+  if [[ -n "${mtu}" ]]; then
+    log "Detected path MTU reference: ${mtu}"
+    if [[ "${mtu}" -lt 1350 || "${mtu}" -gt 1450 ]]; then
+      warn "Path MTU reference is outside the 1350-1450 target range for Trojan: ${mtu}"
+    fi
+  else
+    warn "Unable to detect path MTU reference with ip route get 1.1.1.1."
+  fi
+}
+
+enable_network_tuning() {
+  log "Applying TCP stability tuning..."
+
+  cat > "${NETWORK_SYSCTL_FILE}" <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_keepalive_time=300
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=5
+EOF
+
+  sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || warn "Failed to apply net.core.default_qdisc=fq immediately."
+  sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || warn "Failed to apply net.ipv4.tcp_congestion_control=bbr immediately."
+  sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || warn "Failed to apply net.ipv4.tcp_fastopen=3 immediately."
+  sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || warn "Failed to apply net.ipv4.tcp_mtu_probing=1 immediately."
+  sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || warn "Failed to apply net.ipv4.tcp_keepalive_time=300 immediately."
+  sysctl -w net.ipv4.tcp_keepalive_intvl=30 >/dev/null 2>&1 || warn "Failed to apply net.ipv4.tcp_keepalive_intvl=30 immediately."
+  sysctl -w net.ipv4.tcp_keepalive_probes=5 >/dev/null 2>&1 || warn "Failed to apply net.ipv4.tcp_keepalive_probes=5 immediately."
+  detect_path_mtu
+}
+
+configure_tcp_mss_clamp() {
+  local before_rules="/etc/ufw/before.rules"
+  local before6_rules="/etc/ufw/before6.rules"
+  local marker="# ${UFW_MSS_CLAMP_MARKER}"
+  local tmp_file
+
+  for rules_file in "${before_rules}" "${before6_rules}"; do
+    [[ -f "${rules_file}" ]] || continue
+
+    if grep -Fq "${marker}" "${rules_file}"; then
+      log "UFW MSS clamp rule already present in ${rules_file}"
+      continue
+    fi
+
+    log "Adding UFW MSS clamp rule to ${rules_file}"
+    tmp_file="$(mktemp)"
+    {
+      printf '%s\n' "${marker}"
+      printf '*mangle\n'
+      printf ':POSTROUTING ACCEPT [0:0]\n'
+      printf '-A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n'
+      printf 'COMMIT\n'
+      printf '%s\n' "${marker}"
+      cat "${rules_file}"
+    } > "${tmp_file}"
+    cat "${tmp_file}" > "${rules_file}"
+    rm -f "${tmp_file}"
+  done
+
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
+    ufw reload >/dev/null || true
+  fi
 }
 
 print_client_qr() {
@@ -419,7 +493,14 @@ write_config() {
   "ssl": {
     "cert": "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem",
     "key": "/etc/letsencrypt/live/${DOMAIN}/privkey.pem",
-    "sni": "${DOMAIN}"
+    "sni": "${DOMAIN}",
+    "reuse_session": true,
+    "session_ticket": true
+  },
+  "tcp": {
+    "fast_open": true,
+    "fast_open_qlen": 1024,
+    "keep_alive": true
   }
 }
 EOF
@@ -564,7 +645,9 @@ main() {
   require_root
   preflight_checks
   install_packages
+  enable_network_tuning
   open_required_ports
+  configure_tcp_mss_clamp
   check_dns
   install_trojan_binary
   write_nginx_http_site
