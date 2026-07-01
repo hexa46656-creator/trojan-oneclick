@@ -138,8 +138,24 @@ require_vars() {
   fi
 }
 
+preflight_checks() {
+  require_vars
+
+  if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+    err "PORT 必须是 1-65535 之间的数字，当前值：${PORT}"
+    exit 1
+  fi
+
+  if [[ "$PORT" == "80" ]]; then
+    err "PORT 不能设置为 80。80/tcp 需要留给 Nginx 和 Let's Encrypt HTTP 验证。"
+    exit 1
+  fi
+
+  log "Preflight passed: DOMAIN=${DOMAIN}, EMAIL=${EMAIL}, TROJAN_PORT=${PORT}"
+}
+
 install_packages() {
-  installer_core_install_packages nginx certbot python3-certbot-nginx dnsutils curl unzip ca-certificates ufw xz-utils python3 openssl qrencode
+  installer_core_install_packages nginx certbot python3-certbot-nginx dnsutils curl unzip ca-certificates ufw xz-utils python3 openssl qrencode iproute2
 }
 
 print_client_qr() {
@@ -252,7 +268,7 @@ detect_arch() {
 install_trojan_binary() {
   log "Installing Trojan binary..."
 
-  local arch api_url asset_url tmpdir archive_file trojan_bin
+  local arch api_url asset_url tmpdir archive_file trojan_bin asset_pattern fallback_name
   arch="$(detect_arch)"
   api_url="https://api.github.com/repos/trojan-gfw/trojan/releases/latest"
   tmpdir="/tmp/trojan-oneclick"
@@ -260,21 +276,31 @@ install_trojan_binary() {
 
   mkdir -p "$tmpdir"
 
+  case "$arch" in
+    amd64) asset_pattern='(linux-amd64|amd64|x86_64)' ;;
+    arm64) asset_pattern='(linux-arm64|linux-aarch64|arm64|aarch64)' ;;
+    *) err "不支持的架构：$arch"; exit 1 ;;
+  esac
+
   asset_url="$(curl -fsSL \
     -H "User-Agent: trojan-oneclick-installer" \
     "$api_url" \
     | grep -oE '"browser_download_url":[[:space:]]*"[^"]*\.tar\.xz"' \
-    | grep -E "(${arch}|x86_64|amd64|arm64)" \
+    | grep -Ei "$asset_pattern" \
     | head -n1 \
     | cut -d'"' -f4 || true)"
 
   if [[ -z "${asset_url:-}" ]]; then
     warn "GitHub API latest request failed or returned no matching asset; using fallback Trojan version."
     TROJAN_VERSION="${TROJAN_VERSION:-1.16.0}"
-    asset_url="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
+    fallback_name="trojan-${TROJAN_VERSION}-linux-${arch}.tar.xz"
+    asset_url="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${fallback_name}"
 
-    if [[ "$arch" =~ arm64|aarch64 ]]; then
-      warn "Fallback URL currently points to linux-amd64. This may not work on ARM64 systems."
+    if ! curl -fsSI "$asset_url" >/dev/null 2>&1; then
+      err "No Trojan binary is available for architecture '${arch}'."
+      err "Upstream trojan-gfw/trojan v${TROJAN_VERSION} may only publish linux-amd64 builds."
+      err "Refusing to install an amd64 binary on ${arch}."
+      exit 1
     fi
   fi
 
@@ -303,6 +329,11 @@ install_trojan_binary() {
     err "Trojan installation failed: trojan command not found."
     exit 1
   }
+
+  if ! trojan -v >/dev/null 2>&1; then
+    err "Trojan binary failed to execute on this machine. Architecture may be incompatible."
+    exit 1
+  fi
 
   log "Trojan installed successfully: $(trojan -v 2>&1 | head -n1 || true)"
 }
@@ -342,6 +373,24 @@ request_certificate() {
   err "4) 如果你在使用 Cloudflare，请在签发证书期间切换为 DNS only"
   err "5) 查看 certbot 日志 /var/log/letsencrypt/ 下的详细错误"
   exit 1
+}
+
+open_required_ports() {
+  if command -v ufw >/dev/null 2>&1; then
+    log "Opening required UFW ports before installation: 80/tcp and ${PORT}/tcp..."
+    ufw allow 80/tcp >/dev/null || warn "Could not add UFW rule for 80/tcp. Certificate issuance may fail."
+    ufw allow "${PORT}/tcp" >/dev/null || warn "Could not add UFW rule for ${PORT}/tcp. Trojan may be unreachable."
+
+    if ufw status | grep -q '^Status: active'; then
+      ufw reload >/dev/null || true
+      log "UFW is active. Required ports are allowed."
+    else
+      warn "UFW is not active. Port rules were added but are not currently effective."
+      warn "Before enabling UFW, make sure your SSH port is allowed to avoid locking yourself out."
+    fi
+  else
+    warn "UFW not found. Skipping firewall rule configuration."
+  fi
 }
 
 generate_password() {
@@ -411,8 +460,38 @@ allow_ufw_ports() {
       warn "If you are sure it is safe, run manually: ufw allow OpenSSH && ufw enable"
     fi
   else
-    warn "UFW not found. Skipping firewall rule configuration."
+    warn "UFW not found. Skipping firewall rule verification."
   fi
+}
+
+start_trojan_service() {
+  log "Starting Trojan service..."
+
+  systemctl daemon-reload
+  if ! systemctl enable --now "$SERVICE"; then
+    err "Trojan service failed to start."
+    systemctl status "$SERVICE" --no-pager || true
+    journalctl -u "$SERVICE" -n 80 --no-pager || true
+    exit 1
+  fi
+
+  sleep 2
+
+  if ! systemctl is-active --quiet "$SERVICE"; then
+    err "Trojan service is not active after start."
+    systemctl status "$SERVICE" --no-pager || true
+    journalctl -u "$SERVICE" -n 80 --no-pager || true
+    exit 1
+  fi
+
+  if ! ss -tulpn 2>/dev/null | awk -v port="${PORT}" '{n=split($5,a,":"); if (a[n] == port) found=1} END {exit found ? 0 : 1}'; then
+    err "Trojan service is active but port ${PORT}/tcp is not listening."
+    systemctl status "$SERVICE" --no-pager || true
+    journalctl -u "$SERVICE" -n 80 --no-pager || true
+    exit 1
+  fi
+
+  log "Trojan service is active and listening on ${PORT}/tcp."
 }
 
 write_client_file() {
@@ -483,8 +562,9 @@ print_final_screen() {
 
 main() {
   require_root
-  require_vars
+  preflight_checks
   install_packages
+  open_required_ports
   check_dns
   install_trojan_binary
   write_nginx_http_site
@@ -494,8 +574,7 @@ main() {
   password="$(generate_password)"
   write_config "$password"
   write_service
-  systemctl daemon-reload
-  systemctl enable --now "$SERVICE"
+  start_trojan_service
   allow_ufw_ports
   write_client_file "$password"
   print_final_screen

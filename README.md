@@ -37,6 +37,7 @@ DOMAIN=已经解析到你的IP的域名 EMAIL=您的邮箱 bash <(curl -fsSL htt
 - ufw
 - xz-utils
 - python3
+- iproute2
 
 ## 6. 域名与 Cloudflare 要求
 
@@ -44,13 +45,19 @@ Trojan 必须使用真实域名和证书。请把域名的 DNS 设置为 `DNS on
 
 ## 7. 端口要求
 
-安装完成后，`80/tcp` 和 `443/tcp` 必须放行。脚本会在检测到 UFW 已启用时自动放行这两个端口，但不会重置 UFW，也不会修改 SSH。
+安装前和安装过程中，`80/tcp` 和 Trojan 端口（默认 `443/tcp`）必须放行。脚本会在申请证书前自动添加 UFW 规则，但不会重置 UFW，也不会修改 SSH。云服务器安全组也必须放行这些端口。
 
-## 8. 安装完成后的输出
+`PORT` 不能设置为 `80`，因为 `80/tcp` 需要留给 Nginx 和 Let's Encrypt HTTP 验证。
+
+## 8. 架构要求
+
+官方 `trojan-gfw/trojan` 当前只发布 `linux-amd64` 二进制。脚本会拒绝在 ARM64 上 fallback 安装 amd64 二进制，避免安装后服务无法启动。
+
+## 9. 安装完成后的输出
 
 安装成功后，终端最后一屏会显示彩色高亮的 `trojan://` 导入链接，方便直接复制到 Shadowrocket 或其他客户端。
 
-## 9. Shadowrocket 手动填写
+## 10. Shadowrocket 手动填写
 
 如果 Shadowrocket 无法导入，可手动填写：
 
@@ -62,7 +69,7 @@ Trojan 必须使用真实域名和证书。请把域名的 DNS 设置为 `DNS on
 - SNI/Peer：DOMAIN
 - Allow Insecure：关闭
 
-## 10. 状态查看
+## 11. 状态查看
 
 ```bash
 bash status.sh
@@ -70,18 +77,18 @@ bash status.sh
 
 状态脚本会显示 Trojan 服务状态、监听端口，并直接展示 `/root/trojan-client.txt` 的内容。
 
-## 11. 卸载命令
+## 12. 卸载命令
 
 ```bash
 bash uninstall.sh
 ```
 
-## 12. 常见故障排查
+## 13. 常见故障排查
 
 1. DNS 未生效：先检查 `dig +short DOMAIN` 是否返回当前 VPS 的公网 IPv4。
 2. 公网 IP 不一致：先检查 `curl -4 ifconfig.me` 的结果。
 3. 证书申请失败：查看 `/var/log/letsencrypt/letsencrypt.log`。
-4. 服务启动失败：查看 `journalctl -u trojan-go -n 100 --no-pager`。
+4. 服务启动失败：安装脚本会直接打印 `systemctl status trojan-server.service` 和 `journalctl -u trojan-server.service -n 80 --no-pager`。
 5. 端口无法访问：确认云服务器安全组和本机防火墙已经放行 `80/tcp` 与 `443/tcp`。
 
 ## 中文说明
@@ -150,7 +157,7 @@ bash uninstall.sh
 ### 安全提示
 
 - 请确保域名已经正确解析到当前 VPS
-- 请确保 `80/tcp` 和 `443/tcp` 在云安全组和本机防火墙中已放行
+- 请确保 `80/tcp` 和 Trojan 端口（默认 `443/tcp`）在云安全组和本机防火墙中已放行
 - 不要把客户端密码公开分享
 
 ### 故障排查
