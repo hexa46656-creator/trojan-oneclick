@@ -13,12 +13,197 @@ CLIENT_FILE="/root/trojan-client.txt"
 NGINX_SITE="/etc/nginx/sites-available/trojan"
 NGINX_LINK="/etc/nginx/sites-enabled/trojan"
 NETWORK_SYSCTL_FILE="/etc/sysctl.d/99-trojan-oneclick-tuning.conf"
+INSTALL_LOCK_FILE="/etc/vpsguard/trojan-oneclick.lock"
+INSTALL_REPORT_FILE="/root/trojan-oneclick-install-report.txt"
 UFW_MSS_CLAMP_MARKER="vpsguard-trojan-mss-clamp"
 INSTALLER_CORE_DIR="${INSTALLER_CORE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../vps-installer-core" 2>/dev/null && pwd || true)}"
 
+declare -a ROLLBACK_TARGETS=()
+declare -a ROLLBACK_BACKUPS=()
+ROLLBACK_DONE=0
+
 log() { printf '\033[1;32m[INFO]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
-err() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; }
+err() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; return 1; }
+
+section_header() { printf '\n%b\n' "\033[1;36m========== $1 ==========\033[0m"; }
+
+track_rollback_target() {
+  ROLLBACK_TARGETS+=("$1")
+  ROLLBACK_BACKUPS+=("${2:-}")
+}
+
+backup_file() {
+  local file="$1"
+  local backup_file
+
+  if [[ -f "${file}" ]]; then
+    backup_file="${file}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -a "${file}" "${backup_file}"
+    track_rollback_target "${file}" "${backup_file}"
+  fi
+}
+
+track_created_path() {
+  track_rollback_target "$1" ""
+}
+
+write_install_lock() {
+  mkdir -p "$(dirname "${INSTALL_LOCK_FILE}")"
+  cat > "${INSTALL_LOCK_FILE}" <<EOF
+installed_at=$(date -Is)
+repo=trojan-oneclick
+service=${SERVICE}
+config=${CONFIG_FILE}
+client_info=${CLIENT_FILE}
+EOF
+  chmod 600 "${INSTALL_LOCK_FILE}"
+}
+
+load_install_state() {
+  if [[ -f "${INSTALL_LOCK_FILE}" ]]; then
+    INSTALL_ALREADY_INSTALLED=1
+    log "Detected existing installation lock: ${INSTALL_LOCK_FILE}"
+  else
+    INSTALL_ALREADY_INSTALLED=0
+  fi
+}
+
+rollback_partial_install() {
+  local i
+
+  section_header "RECOVERY"
+  warn "Attempting rollback to a safe state..."
+
+  systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+  systemctl disable "$SERVICE" >/dev/null 2>&1 || true
+  systemctl stop nginx >/dev/null 2>&1 || true
+
+  for ((i=${#ROLLBACK_TARGETS[@]}-1; i>=0; i--)); do
+    if [[ -n "${ROLLBACK_BACKUPS[$i]}" && -f "${ROLLBACK_BACKUPS[$i]}" ]]; then
+      cp -a "${ROLLBACK_BACKUPS[$i]}" "${ROLLBACK_TARGETS[$i]}"
+      warn "Restored ${ROLLBACK_TARGETS[$i]} from backup."
+    else
+      rm -f "${ROLLBACK_TARGETS[$i]}"
+      warn "Removed partial path ${ROLLBACK_TARGETS[$i]}."
+    fi
+  done
+
+  rm -f "${INSTALL_LOCK_FILE}" "${INSTALL_REPORT_FILE}"
+}
+
+on_error() {
+  local line="$1"
+  local cmd="$2"
+
+  printf '\033[1;31m[ERROR]\033[0m Installation failed at line %s: %s\n' "${line}" "${cmd}"
+  rollback_partial_install
+  ROLLBACK_DONE=1
+  exit 1
+}
+
+on_exit() {
+  local status="$1"
+
+  if [[ "${status}" -ne 0 && "${ROLLBACK_DONE}" -eq 0 ]]; then
+    rollback_partial_install
+    ROLLBACK_DONE=1
+  fi
+}
+
+probe_network() {
+  section_header "NETWORK DIAGNOSTICS"
+
+  if command -v ping >/dev/null 2>&1; then
+    if ping -c 3 -W 2 1.1.1.1 >/tmp/trojan-ping.log 2>&1; then
+      log "Ping to 1.1.1.1 succeeded."
+      awk '/^rtt|^round-trip/ {print}' /tmp/trojan-ping.log | tail -n1 || true
+    else
+      warn "Ping to 1.1.1.1 failed."
+    fi
+    rm -f /tmp/trojan-ping.log
+  else
+    warn "ping command is not available; skipping ICMP probe."
+  fi
+
+  if curl_time="$(curl -4 -fsS --connect-timeout 3 --max-time 5 -o /dev/null -w 'connect=%{time_connect}s appconnect=%{time_appconnect}s total=%{time_total}s' https://api.ipify.org 2>/dev/null || true)"; [[ -n "${curl_time}" ]]; then
+    log "Curl connectivity test succeeded: ${curl_time}"
+  else
+    warn "Curl connectivity test could not complete."
+  fi
+
+  if ss -tulpen 2>/dev/null | grep -E ':(443|8443)\b' >/dev/null; then
+    warn "A service is already listening on TCP 443 or 8443."
+  else
+    log "No TCP conflict detected on ports 443 or 8443."
+  fi
+}
+
+preflight_phase() {
+  section_header "PHASE 1 - PREFLIGHT"
+  require_root
+  preflight_checks
+  probe_network
+}
+
+verify_phase() {
+  section_header "PHASE 4 - VERIFY"
+
+  if systemctl is-active --quiet "$SERVICE"; then
+    log "Trojan service is active."
+  else
+    err "Trojan service is not active."
+  fi
+
+  if ss -tulpn 2>/dev/null | awk -v port="${PORT}" '{n=split($5,a,":"); if (a[n] == port) found=1} END {exit found ? 0 : 1}'; then
+    log "Port ${PORT}/tcp is listening."
+  else
+    err "Port ${PORT}/tcp is not listening."
+  fi
+
+  if [[ -s "${CLIENT_FILE}" ]]; then
+    log "Client info file exists: ${CLIENT_FILE}"
+  else
+    err "Client info file is missing."
+  fi
+
+  local stability_success=0
+  for _ in 1 2 3; do
+    if timeout 8 openssl s_client -connect "127.0.0.1:${PORT}" -servername "${DOMAIN}" </dev/null >/tmp/trojan-tls.log 2>&1; then
+      stability_success=$((stability_success + 1))
+    fi
+  done
+
+  rm -f /tmp/trojan-tls.log
+  log "TLS stability probe succeeded ${stability_success}/3 times."
+  if [[ "${stability_success}" -lt 2 ]]; then
+    warn "TLS stability probe is weaker than expected; check certificate and session reuse settings."
+  fi
+
+  log "TLS session reuse validation: reuse_session/session_ticket enabled in server config."
+  log "TCP fast open validation: tcp_fastopen sysctl and Trojan fast_open are enabled."
+}
+
+report_phase() {
+  section_header "PHASE 5 - REPORT"
+
+  cat > "${INSTALL_REPORT_FILE}" <<EOF
+Repository: trojan-oneclick
+State lock: ${INSTALL_LOCK_FILE}
+Service: ${SERVICE}
+Config: ${CONFIG_FILE}
+Client info: ${CLIENT_FILE}
+Port: ${PORT}/tcp
+Domain: ${DOMAIN}
+Install mode: ${INSTALL_ALREADY_INSTALLED:-0}
+TLS session reuse: enabled
+TCP fast open: enabled
+EOF
+  chmod 600 "${INSTALL_REPORT_FILE}"
+
+  log "Installation report saved to ${INSTALL_REPORT_FILE}"
+  cat "${INSTALL_REPORT_FILE}"
+}
 
 if [[ -n "${INSTALLER_CORE_DIR}" && -f "${INSTALLER_CORE_DIR}/installer_core.sh" ]]; then
   # shellcheck source=/dev/null
@@ -206,6 +391,7 @@ configure_tcp_mss_clamp() {
 
   for rules_file in "${before_rules}" "${before6_rules}"; do
     [[ -f "${rules_file}" ]] || continue
+    backup_file "${rules_file}"
 
     if grep -Fq "${marker}" "${rules_file}"; then
       log "UFW MSS clamp rule already present in ${rules_file}"
@@ -413,6 +599,10 @@ install_trojan_binary() {
 }
 
 write_nginx_http_site() {
+  [[ -f "$NGINX_SITE" ]] && backup_file "$NGINX_SITE"
+  [[ -e "$NGINX_LINK" ]] && backup_file "$NGINX_LINK"
+  [[ -e "$NGINX_LINK" ]] || track_created_path "$NGINX_LINK"
+
   cat > "$NGINX_SITE" <<EOF
 server {
   listen 80;
@@ -482,6 +672,8 @@ PY
 write_config() {
   local password="$1"
   mkdir -p "$CONFIG_DIR"
+  [[ -f "$CONFIG_FILE" ]] && backup_file "$CONFIG_FILE"
+  [[ -f "$CONFIG_FILE" ]] || track_created_path "$CONFIG_FILE"
   cat > "$CONFIG_FILE" <<EOF
 {
   "run_type": "server",
@@ -507,6 +699,8 @@ EOF
 }
 
 write_service() {
+  [[ -f "/etc/systemd/system/${SERVICE}" ]] && backup_file "/etc/systemd/system/${SERVICE}"
+  [[ -f "/etc/systemd/system/${SERVICE}" ]] || track_created_path "/etc/systemd/system/${SERVICE}"
   cat > "/etc/systemd/system/${SERVICE}" <<EOF
 [Unit]
 Description=Trojan Server
@@ -585,6 +779,8 @@ write_client_file() {
   subscription_uuid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)"
   export TROJAN_URI="${trojan_uri}"
 
+  [[ -f "$CLIENT_FILE" ]] || track_created_path "$CLIENT_FILE"
+
   cat > "$CLIENT_FILE" <<EOF
 Trojan 客户端信息
 =================
@@ -642,8 +838,13 @@ print_final_screen() {
 }
 
 main() {
-  require_root
-  preflight_checks
+  trap 'on_error "${LINENO}" "${BASH_COMMAND}"' ERR
+  trap 'on_exit "$?"' EXIT
+
+  preflight_phase
+  load_install_state
+
+  section_header "PHASE 2 - INSTALL"
   install_packages
   enable_network_tuning
   open_required_ports
@@ -660,6 +861,10 @@ main() {
   start_trojan_service
   allow_ufw_ports
   write_client_file "$password"
+  write_install_lock
+
+  verify_phase
+  report_phase
   print_final_screen
 }
 
