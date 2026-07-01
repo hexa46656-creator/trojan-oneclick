@@ -18,13 +18,107 @@ log() { printf '\033[1;32m[INFO]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; }
 
-if [[ -z "${INSTALLER_CORE_DIR}" || ! -f "${INSTALLER_CORE_DIR}/installer_core.sh" ]]; then
-  err "Missing shared installer core. Expected vps-installer-core/installer_core.sh next to this repository or set INSTALLER_CORE_DIR."
-  exit 1
+if [[ -n "${INSTALLER_CORE_DIR}" && -f "${INSTALLER_CORE_DIR}/installer_core.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${INSTALLER_CORE_DIR}/installer_core.sh"
 fi
 
-# shellcheck source=/dev/null
-source "${INSTALLER_CORE_DIR}/installer_core.sh"
+if ! declare -F installer_core_detect_os >/dev/null 2>&1; then
+  installer_core_detect_os() {
+    local os_id
+    local os_name
+    local os_pretty_name
+    local init_comm
+
+    if [[ ! -r /etc/os-release ]]; then
+      err "无法读取 /etc/os-release"
+      exit 1
+    fi
+
+    # shellcheck disable=SC1091
+    . /etc/os-release
+
+    os_id="${ID:-unknown}"
+    os_name="${NAME:-${ID:-unknown}}"
+    os_pretty_name="${PRETTY_NAME:-${os_name}}"
+
+    case "${os_id}" in
+      ubuntu|debian) ;;
+      *) err "不支持的系统：${os_pretty_name}，仅支持 Ubuntu 或 Debian"; exit 1 ;;
+    esac
+
+    init_comm="$(ps -p 1 -o comm= 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "${init_comm}" != "systemd" && ! -d /run/systemd/system ]]; then
+      err "systemd 不可用，无法继续安装"
+      exit 1
+    fi
+
+    # shellcheck disable=SC2034
+    INSTALLER_OS_ID="${os_id}"
+    # shellcheck disable=SC2034
+    INSTALLER_OS_NAME="${os_name}"
+    # shellcheck disable=SC2034
+    INSTALLER_OS_VERSION_ID="${VERSION_ID:-unknown}"
+    # shellcheck disable=SC2034
+    INSTALLER_OS_PRETTY_NAME="${os_pretty_name}"
+  }
+fi
+
+if ! declare -F installer_core_install_packages >/dev/null 2>&1; then
+  installer_core_install_packages() {
+    local packages=("$@")
+
+    if [[ "${#packages[@]}" -eq 0 ]]; then
+      return 0
+    fi
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update
+      apt-get install -y "${packages[@]}"
+    else
+      apt update
+      apt install -y "${packages[@]}"
+    fi
+  }
+fi
+
+if ! declare -F installer_core_subscription_protocol_defaults >/dev/null 2>&1; then
+  installer_core_subscription_protocol_defaults() {
+    SUBSCRIPTION_ACCESS_URL="${SUBSCRIPTION_ACCESS_URL:-${TROJAN_URI:-}}"
+  }
+fi
+
+if ! declare -F installer_core_publish_subscription >/dev/null 2>&1; then
+  installer_core_publish_subscription() {
+    SUBSCRIPTION_ACCESS_URL="${SUBSCRIPTION_ACCESS_URL:-${TROJAN_URI:-}}"
+  }
+fi
+
+if ! declare -F installer_core_mode_label >/dev/null 2>&1; then
+  installer_core_mode_label() {
+    printf '%s\n' "standalone"
+  }
+fi
+
+if ! declare -F installer_core_print_completion_block >/dev/null 2>&1; then
+  installer_core_print_completion_block() {
+    local mode="${1:-standalone}"
+    local access_url="${2:-${SUBSCRIPTION_ACCESS_URL:-${TROJAN_URI:-${HY2_URI:-${VLESS_LINK:-}}}}}"
+    local clients="${3:-}"
+
+    printf '\n\033[1;32m============================================================\033[0m\n'
+    printf '\033[1;32m%s\033[0m\n' "${mode}"
+    if [[ -n "${access_url}" ]]; then
+      printf '\033[1;33m链接: %s\033[0m\n' "${access_url}"
+    fi
+    if [[ -n "${clients}" ]]; then
+      printf '\033[1;33m客户端: %s\033[0m\n' "${clients}"
+    fi
+    printf '\033[1;32m============================================================\033[0m\n'
+  }
+fi
 
 require_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -67,7 +161,7 @@ print_client_qr() {
       apt update >/dev/null 2>&1 || true
       apt install -y qrencode >/dev/null 2>&1 || true
     elif command -v apt-get >/dev/null 2>&1; then
-      apt-get update -y >/dev/null 2>&1 || true
+      apt-get update >/dev/null 2>&1 || true
       apt-get install -y qrencode >/dev/null 2>&1 || true
     fi
   fi
@@ -329,6 +423,7 @@ write_client_file() {
   encoded_name="$(urlencode "Trojan-${DOMAIN}")"
   trojan_uri="trojan://${encoded_password}@${DOMAIN}:${PORT}?peer=${DOMAIN}&sni=${DOMAIN}#${encoded_name}"
   subscription_uuid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)"
+  export TROJAN_URI="${trojan_uri}"
 
   cat > "$CLIENT_FILE" <<EOF
 Trojan 客户端信息
@@ -364,6 +459,7 @@ EOF
   export SUBSCRIPTION_SNI="${DOMAIN}"
   installer_core_subscription_protocol_defaults
   installer_core_publish_subscription
+  : "${SUBSCRIPTION_ACCESS_URL:=${TROJAN_URI:-}}"
 }
 
 print_final_screen() {
